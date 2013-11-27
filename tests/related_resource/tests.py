@@ -11,7 +11,8 @@ from core.models import Note, MediaBit
 from core.tests.resources import HttpRequest
 from core.tests.mocks import MockRequest
 from tastypie import fields
-from related_resource.api.resources import FreshNoteResource, CategoryResource, PersonResource, JobResource
+from related_resource.api.resources import FreshNoteResource, CategoryResource, PersonResource, \
+    JobResource, DepthLimitedCategoryResource, ZeroDepthCategoryResource
 from related_resource.api.urls import api
 from related_resource.models import Category, Tag, Taggable, TaggableTag, ExtraData, Company, Person, Dog, DogHouse, Bone, Product, Address, Job, Payment
 from related_resource.models import Label
@@ -88,6 +89,41 @@ class CategoryResourceTest(TestCase):
         self.assertEqual(data['parent'], '/v1/category/2/')
         self.assertEqual(data['name'], 'Daughter')
 
+    def test_depth_limits(self):
+        self.grandchild_cat = Category.objects.create(parent=self.child_cat_1, name='Grandson')
+        self.great_grandchild_cat = Category.objects.create(parent=self.grandchild_cat, name='Great-Grandson')
+
+        resource = api.canonical_resource_for('depth-category')
+        request = MockRequest()
+        request.GET = {'format': 'json'}
+        request.method = 'GET'
+        resp = resource.wrap_view('dispatch_detail')(request, pk=self.great_grandchild_cat.pk)
+
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.content)
+        self.assertEqual(data['name'], 'Great-Grandson')
+        self.assertEqual(data['parent']['name'], 'Grandson')
+        self.assertEqual(data['parent']['parent']['name'], 'Son')
+        self.assertEqual(data['parent']['parent']['parent'], '/v1/depth-category/1/')
+
+    def test_zero_depth(self):
+        self.grandchild_cat = Category.objects.create(parent=self.child_cat_1, name='Grandson')
+        self.great_grandchild_cat = Category.objects.create(parent=self.grandchild_cat, name='Great-Grandson')
+
+        resource = api.canonical_resource_for('zero-depth-category')
+        request = MockRequest()
+        request.GET = {'format': 'json'}
+        request.method = 'GET'
+        resp = resource.wrap_view('dispatch_detail')(request, pk=self.great_grandchild_cat.pk)
+
+        self.assertEqual(resp.status_code, 200)
+        data = json.loads(resp.content)
+        self.assertEqual(data['name'], 'Great-Grandson')
+        self.assertEqual(data['parent']['name'], 'Grandson')
+        self.assertEqual(data['parent']['parent']['name'], 'Son')
+        self.assertEqual(data['parent']['parent']['parent']['name'], 'Dad')
+
+
     def test_put_null(self):
         resource = api.canonical_resource_for('category')
         request = MockRequest()
@@ -118,7 +154,7 @@ class ExplicitM2MResourceRegressionTest(TestCase):
 
         # Give each tag some extra data (the lookup of this data is what makes the test fail)
         self.extradata_1 = ExtraData.objects.create(tag=self.tag_1, name='additional')
-        
+
 
     def test_correct_setup(self):
         request = MockRequest()
@@ -257,7 +293,7 @@ class RelationshipOppositeFromModelTestCase(TestCase):
 
 class RelatedPatchTestCase(TestCase):
     urls = 'related_resource.api.urls'
-    
+
     def setUp(self):
         super(RelatedPatchTestCase, self).setUp()
         #this test doesn't use MockRequest, so the body attribute is different.
@@ -526,7 +562,7 @@ class NestedRelatedResourceTest(TestCase):
         request.path = reverse('api_dispatch_detail', kwargs={'pk': pk, 'resource_name': pr._meta.resource_name, 'api_name': pr._meta.api_name})
         resp = pr.put_detail(request, pk=pk)
         self.assertEqual(resp.status_code, 204)
-        
+
         self.assertEqual(Bone.objects.count(), 1)
         bone = Bone.objects.all()[0]
         self.assertEqual(bone.color, 'gray')
@@ -567,7 +603,7 @@ class RelatedSaveCallsTest(TestCase):
             'name': 'Foo',
             'parent': resource.get_resource_uri(parent)
         })
-        
+
         request.set_body(body)
 
         with self.assertNumQueries(2):
@@ -594,7 +630,7 @@ class RelatedSaveCallsTest(TestCase):
         })
 
         request.set_body(body)
-        
+
         resource.post_list(request) #_save_fails_test will explode if Label is saved
 
 
@@ -611,9 +647,9 @@ class RelatedSaveCallsTest(TestCase):
         body_dict = {'name':'school',
                      'taggabletags':[{'extra':7}]
                      }
-        
+
         request.set_body(json.dumps(body_dict))
-        
+
         resp = resource.wrap_view('dispatch_list')(request)
         self.assertEqual(resp.status_code, 201)
 
@@ -623,17 +659,17 @@ class RelatedSaveCallsTest(TestCase):
         self.assertEqual(taggable_tag.extra, 7)
 
         body_dict['taggabletags'] = [{'extra':1234}]
-        
+
         request.set_body(json.dumps(body_dict))
 
-        request.path = reverse('api_dispatch_detail', kwargs={'pk': tag.pk, 
-                                                              'resource_name': resource._meta.resource_name, 
+        request.path = reverse('api_dispatch_detail', kwargs={'pk': tag.pk,
+                                                              'resource_name': resource._meta.resource_name,
                                                               'api_name': resource._meta.api_name})
 
         resource.put_detail(request)
-        
+
         #'extra' should have changed
         tag = Tag.objects.all()[0]
         taggable_tag = tag.taggabletags.all()[0]
         self.assertEqual(taggable_tag.extra, 1234)
-        
+
