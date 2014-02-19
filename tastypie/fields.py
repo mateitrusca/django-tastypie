@@ -412,7 +412,7 @@ class RelatedField(ApiField):
     self_referential = False
     help_text = 'A related resource. Can be either a URI or set of nested resource data.'
 
-    def __init__(self, to, attribute, related_name=None, default=NOT_PROVIDED, null=False, blank=False, readonly=False, full=False, unique=False, help_text=None, use_in='all', full_list=True, full_detail=True):
+    def __init__(self, to, attribute, related_name=None, default=NOT_PROVIDED, null=False, blank=False, readonly=False, full=False, unique=False, help_text=None, use_in='all', full_list=True, full_detail=True, max_depth=None):
         """
         Builds the field and prepares it to access to related data.
 
@@ -489,6 +489,8 @@ class RelatedField(ApiField):
         if use_in in ['all', 'detail', 'list'] or callable(use_in):
             self.use_in = use_in
 
+        self.max_depth = max_depth
+
         if self.to == 'self':
             self.self_referential = True
             self._to_class = self.__class__
@@ -557,17 +559,17 @@ class RelatedField(ApiField):
         """
         should_dehydrate_full_resource = self.should_full_dehydrate(bundle, for_list=for_list)
 
-        if not should_dehydrate_full_resource:
-            # Be a good netizen.
-            return related_resource.get_resource_uri(bundle)
-        else:
-            # ZOMG extra data and big payloads.
-            bundle = related_resource.build_bundle(
-                obj=related_resource.instance,
-                request=bundle.request,
-                objects_saved=bundle.objects_saved
-            )
-            return related_resource.full_dehydrate(bundle)
+        if should_dehydrate_full_resource:
+            depth = getattr(bundle, 'depth', None)
+            if depth is None:
+                depth = self.max_depth
+            if depth is None or depth:
+                # ZOMG extra data and big payloads.
+                bundle = related_resource.build_bundle(obj=related_resource.instance, request=bundle.request)
+                bundle.depth = depth
+                return related_resource.full_dehydrate(bundle)
+        # If not full or we've run out of depth, Be a good netizen.
+        return related_resource.get_resource_uri(bundle)
 
     def resource_from_uri(self, fk_resource, uri, request=None, related_obj=None, related_name=None):
         """
@@ -696,12 +698,12 @@ class ToOneField(RelatedField):
 
     def __init__(self, to, attribute, related_name=None, default=NOT_PROVIDED,
                  null=False, blank=False, readonly=False, full=False,
-                 unique=False, help_text=None, use_in='all', full_list=True, full_detail=True):
+                 unique=False, help_text=None, use_in='all', full_list=True, full_detail=True, max_depth=None):
         super(ToOneField, self).__init__(
             to, attribute, related_name=related_name, default=default,
             null=null, blank=blank, readonly=readonly, full=full,
             unique=unique, help_text=help_text, use_in=use_in,
-            full_list=full_list, full_detail=full_detail
+            full_list=full_list, full_detail=full_detail, max_depth=max_depth
         )
         self.fk_resource = None
 
@@ -727,8 +729,14 @@ class ToOneField(RelatedField):
 
             return None
 
+
         self.fk_resource = self.get_related_resource(foreign_obj)
         fk_bundle = Bundle(obj=foreign_obj, request=bundle.request)
+        depth = getattr(bundle, 'depth', None)
+        if depth is None:
+            depth = self.max_depth
+        if depth is not None:
+            fk_bundle.depth = depth - 1
         return self.dehydrate_related(fk_bundle, self.fk_resource, for_list=for_list)
 
     def hydrate(self, bundle):
@@ -768,12 +776,12 @@ class ToManyField(RelatedField):
 
     def __init__(self, to, attribute, related_name=None, default=NOT_PROVIDED,
                  null=False, blank=False, readonly=False, full=False,
-                 unique=False, help_text=None, use_in='all', full_list=True, full_detail=True):
+                 unique=False, help_text=None, use_in='all', full_list=True, full_detail=True, max_depth=None):
         super(ToManyField, self).__init__(
             to, attribute, related_name=related_name, default=default,
             null=null, blank=blank, readonly=readonly, full=full,
             unique=unique, help_text=help_text, use_in=use_in,
-            full_list=full_list, full_detail=full_detail
+            full_list=full_list, full_detail=full_detail, max_depth=max_depth
         )
         self.m2m_bundles = []
 
@@ -814,12 +822,17 @@ class ToManyField(RelatedField):
         self.m2m_resources = []
         m2m_dehydrated = []
 
+        depth = getattr(bundle, 'depth', None)
+        if depth is None:
+            depth = self.max_depth
         # TODO: Also model-specific and leaky. Relies on there being a
         #       ``Manager`` there.
         for m2m in the_m2ms.all():
             m2m_resource = self.get_related_resource(m2m)
             m2m_bundle = Bundle(obj=m2m, request=bundle.request)
             self.m2m_resources.append(m2m_resource)
+            if depth is not None:
+                m2m_bundle.depth = depth - 1
             m2m_dehydrated.append(self.dehydrate_related(m2m_bundle, m2m_resource, for_list=for_list))
 
         return m2m_dehydrated

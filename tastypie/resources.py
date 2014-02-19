@@ -1,6 +1,7 @@
 from __future__ import unicode_literals
 from __future__ import with_statement
 from copy import deepcopy
+import urlparse
 import logging
 import warnings
 
@@ -20,7 +21,7 @@ from tastypie.authentication import Authentication
 from tastypie.authorization import ReadOnlyAuthorization
 from tastypie.bundle import Bundle
 from tastypie.cache import NoCache
-from tastypie.constants import ALL, ALL_WITH_RELATIONS
+from tastypie.constants import ALL, ALL_WITH_RELATIONS, DEFAULT_DEPTH
 from tastypie.exceptions import NotFound, BadRequest, InvalidFilterError, HydrationError, InvalidSortError, ImmediateHttpResponse, Unauthorized
 from tastypie import fields
 from tastypie import http
@@ -672,7 +673,7 @@ class Resource(six.with_metaclass(DeclarativeMetaclass)):
 
         return auth_result
 
-    def build_bundle(self, obj=None, data=None, request=None, objects_saved=None):
+    def build_bundle(self, obj=None, data=None, request=None, objects_saved=None, depth=None):
         """
         Given either an object, a data dictionary or both, builds a ``Bundle``
         for use throughout the ``dehydrate/hydrate`` cycle.
@@ -684,12 +685,15 @@ class Resource(six.with_metaclass(DeclarativeMetaclass)):
         if obj is None and self._meta.object_class:
             obj = self._meta.object_class()
 
-        return Bundle(
+        bundle = Bundle(
             obj=obj,
             data=data,
             request=request,
             objects_saved=objects_saved
         )
+        if depth:
+            bundle.depth = depth
+        return bundle
 
     def build_filters(self, filters=None):
         """
@@ -1270,10 +1274,11 @@ class Resource(six.with_metaclass(DeclarativeMetaclass)):
         to_be_serialized = paginator.page()
 
         # Dehydrate the bundles in preparation for serialization.
+        depth = self.depth_from_request(request)
         bundles = []
 
         for obj in to_be_serialized[self._meta.collection_name]:
-            bundle = self.build_bundle(obj=obj, request=request)
+            bundle = self.build_bundle(obj=obj, request=request, depth=depth)
             bundles.append(self.full_dehydrate(bundle, for_list=True))
 
         to_be_serialized[self._meta.collection_name] = bundles
@@ -1290,7 +1295,6 @@ class Resource(six.with_metaclass(DeclarativeMetaclass)):
         Should return a HttpResponse (200 OK).
         """
         basic_bundle = self.build_bundle(request=request)
-
         try:
             obj = self.cached_obj_get(bundle=basic_bundle, **self.remove_api_resource_names(kwargs))
         except ObjectDoesNotExist:
@@ -1298,7 +1302,8 @@ class Resource(six.with_metaclass(DeclarativeMetaclass)):
         except MultipleObjectsReturned:
             return http.HttpMultipleChoices("More than one resource is found at this URI.")
 
-        bundle = self.build_bundle(obj=obj, request=request)
+        depth = self.depth_from_request(request)
+        bundle = self.build_bundle(obj=obj, request=request, depth=depth)
         bundle = self.full_dehydrate(bundle)
         bundle = self.alter_detail_data_to_serialize(request, bundle)
         return self.create_response(request, bundle)
@@ -1316,7 +1321,8 @@ class Resource(six.with_metaclass(DeclarativeMetaclass)):
         """
         deserialized = self.deserialize(request, request.body, format=request.META.get('CONTENT_TYPE', 'application/json'))
         deserialized = self.alter_deserialized_detail_data(request, deserialized)
-        bundle = self.build_bundle(data=dict_strip_unicode_keys(deserialized), request=request)
+        depth = self.depth_from_request(request)
+        bundle = self.build_bundle(data=dict_strip_unicode_keys(deserialized), request=request, depth=depth)
         updated_bundle = self.obj_create(bundle, **self.remove_api_resource_names(kwargs))
         location = self.get_resource_uri(updated_bundle)
 
@@ -1357,12 +1363,13 @@ class Resource(six.with_metaclass(DeclarativeMetaclass)):
         if not self._meta.collection_name in deserialized:
             raise BadRequest("Invalid data sent.")
 
+        depth = self.depth_from_request(request)
         basic_bundle = self.build_bundle(request=request)
         self.obj_delete_list_for_update(bundle=basic_bundle, **self.remove_api_resource_names(kwargs))
         bundles_seen = []
 
         for object_data in deserialized[self._meta.collection_name]:
-            bundle = self.build_bundle(data=dict_strip_unicode_keys(object_data), request=request)
+            bundle = self.build_bundle(data=dict_strip_unicode_keys(object_data), request=request, depth=depth)
 
             # Attempt to be transactional, deleting any previously created
             # objects if validation fails.
@@ -1402,8 +1409,9 @@ class Resource(six.with_metaclass(DeclarativeMetaclass)):
         """
         deserialized = self.deserialize(request, request.body, format=request.META.get('CONTENT_TYPE', 'application/json'))
         deserialized = self.alter_deserialized_detail_data(request, deserialized)
-        bundle = self.build_bundle(data=dict_strip_unicode_keys(deserialized), request=request)
-
+        depth = self.depth_from_request(request)
+        bundle = self.build_bundle(data=dict_strip_unicode_keys(deserialized), request=request, depth=depth)
+        # bundle.depth = 1
         try:
             updated_bundle = self.obj_update(bundle=bundle, **self.remove_api_resource_names(kwargs))
 
@@ -1519,6 +1527,7 @@ class Resource(six.with_metaclass(DeclarativeMetaclass)):
         if len(deserialized[collection_name]) and 'put' not in self._meta.detail_allowed_methods:
             raise ImmediateHttpResponse(response=http.HttpMethodNotAllowed())
 
+        depth = self.depth_from_request(request)
         bundles_seen = []
 
         for data in deserialized[collection_name]:
@@ -1531,7 +1540,7 @@ class Resource(six.with_metaclass(DeclarativeMetaclass)):
                     obj = self.get_via_uri(uri, request=request)
 
                     # The object does exist, so this is an update-in-place.
-                    bundle = self.build_bundle(obj=obj, request=request)
+                    bundle = self.build_bundle(obj=obj, request=request, depth=depth)
                     bundle = self.full_dehydrate(bundle, for_list=True)
                     bundle = self.alter_detail_data_to_serialize(request, bundle)
                     self.update_in_place(request, bundle, data)
@@ -1539,13 +1548,13 @@ class Resource(six.with_metaclass(DeclarativeMetaclass)):
                     # The object referenced by resource_uri doesn't exist,
                     # so this is a create-by-PUT equivalent.
                     data = self.alter_deserialized_detail_data(request, data)
-                    bundle = self.build_bundle(data=dict_strip_unicode_keys(data), request=request)
+                    bundle = self.build_bundle(data=dict_strip_unicode_keys(data), request=request, depth=depth)
                     self.obj_create(bundle=bundle)
             else:
                 # There's no resource URI, so this is a create call just
                 # like a POST to the list resource.
                 data = self.alter_deserialized_detail_data(request, data)
-                bundle = self.build_bundle(data=dict_strip_unicode_keys(data), request=request)
+                bundle = self.build_bundle(data=dict_strip_unicode_keys(data), request=request, depth=depth)
                 self.obj_create(bundle=bundle)
 
             bundles_seen.append(bundle)
@@ -1558,7 +1567,7 @@ class Resource(six.with_metaclass(DeclarativeMetaclass)):
 
             for uri in deleted_collection:
                 obj = self.get_via_uri(uri, request=request)
-                bundle = self.build_bundle(obj=obj, request=request)
+                bundle = self.build_bundle(obj=obj, request=request, depth=depth)
                 self.obj_delete(bundle=bundle)
 
         if not self._meta.always_return_data:
@@ -1594,7 +1603,8 @@ class Resource(six.with_metaclass(DeclarativeMetaclass)):
         except MultipleObjectsReturned:
             return http.HttpMultipleChoices("More than one resource is found at this URI.")
 
-        bundle = self.build_bundle(obj=obj, request=request)
+        depth = self.depth_from_request(request)
+        bundle = self.build_bundle(obj=obj, request=request, depth=depth)
         bundle = self.full_dehydrate(bundle)
         bundle = self.alter_detail_data_to_serialize(request, bundle)
 
@@ -1681,6 +1691,41 @@ class Resource(six.with_metaclass(DeclarativeMetaclass)):
 
         self.log_throttled_access(request)
         return self.create_response(request, object_list)
+
+
+    def depth_from_request(self, request):
+        # first look in accept header
+        depth = self.depth_from_accept_header(request)
+        # then in GET args
+        if depth is None:
+            depth = self.depth_from_get_params(request)
+
+        depth = depth if depth else DEFAULT_DEPTH
+        return depth
+
+    def depth_from_accept_header(self, request):
+        accept_header = request.META.get('HTTP_ACCEPT', None)
+        if not accept_header:
+            return None
+        params = urlparse.parse_qs(accept_header)
+        depth = params.get('depth', None)
+        if depth:
+            try:
+                depth = int(depth[0])
+            except IndexError:
+                return None
+            except TypeError:
+                return None
+        return depth
+
+    def depth_from_get_params(self, request):
+        depth = request.GET.get('depth', None)
+        if depth:
+            try:
+                depth = int(depth)
+            except TypeError:
+                return None
+        return depth
 
 
 class ModelDeclarativeMetaclass(DeclarativeMetaclass):
