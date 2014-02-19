@@ -258,7 +258,7 @@ in full. Default is ``True``
 Sets a limit on how deeply nested data structures will be rendered in full.  
 Value is an integer representing the depth to which the relationship will be followed, 
 including the current resource.  (``max_depth=1`` is equivalent to ``full=False``).  
-Default is None, which indicated no limit.  Ignored when ``full=False``.
+Default is 1, which indicates the data will not be expanded, equivalent to ``full=False``.
 
 ``related_name``
 ~~~~~~~~~~~~~~~~
